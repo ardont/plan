@@ -85,9 +85,9 @@ def extract_legend_data(pdf_path, dpi, auto_legend, manual_coords):
     templates = extractor.extract_templates(legend_image)
     return legend_coords, templates
 
-# Функция поиска значков на чертеже (кэшированная)
+# Функция поиска одного значка на чертеже (кэшированная)
 @st.cache_data
-def run_search_on_drawing(pdf_path, dpi, templates_to_search, legend_coords, tm_threshold):
+def detect_single_template(pdf_path, dpi, name, t_img, legend_coords, tm_threshold):
     config = get_config()
     image = get_cached_pdf_image(pdf_path, page_num=0, dpi=dpi, cache_dir=config['paths']['processed_dir'])
     
@@ -97,7 +97,7 @@ def run_search_on_drawing(pdf_path, dpi, templates_to_search, legend_coords, tm_
     config_run['detectors']['template_matching']['threshold'] = tm_threshold
     
     detector = TemplateMatchingDetector(config_run)
-    detections = detector.detect(image, templates_to_search, exclude_region=legend_coords)
+    detections = detector.detect(image, {name: t_img}, exclude_region=legend_coords)
     return detections
 
 def list_available_presets(config):
@@ -271,6 +271,14 @@ def main():
     selected_pdf = st.sidebar.selectbox("Выберите чертеж для анализа", pdf_files)
     pdf_path = os.path.join(raw_dir, selected_pdf)
     
+    # Предварительно загружаем превью чертежа для получения размеров (150 DPI)
+    try:
+        preview_img = get_cached_pdf_image(pdf_path, page_num=0, dpi=150, cache_dir=config['paths']['processed_dir'])
+        img_h, img_w = preview_img.shape[:2]
+    except Exception as e:
+        st.error(f"Не удалось загрузить предварительный просмотр чертежа: {e}")
+        return
+    
     st.sidebar.write("---")
     dpi = st.sidebar.slider("DPI (разрешение рендеринга)", min_value=150, max_value=600, value=300, step=50, 
                             help="Выше DPI - точнее распознавание мелких значков, но больше времени на обработку.")
@@ -281,12 +289,28 @@ def main():
     
     manual_coords = config['legend']['manual_coords']
     if not auto_legend:
-        st.sidebar.info("Задайте координаты области легенды (в долях от 0.0 до 1.0):")
-        x_min_f = st.sidebar.slider("X min (лево)", 0.0, 1.0, 0.7, step=0.05)
-        y_min_f = st.sidebar.slider("Y min (верх)", 0.0, 1.0, 0.5, step=0.05)
-        x_max_f = st.sidebar.slider("X max (право)", 0.0, 1.0, 1.0, step=0.05)
-        y_max_f = st.sidebar.slider("Y max (низ)", 0.0, 1.0, 1.0, step=0.05)
-        manual_coords = [x_min_f, y_min_f, x_max_f, y_max_f]
+        st.sidebar.markdown("### Настройка рамки (в пикселях)")
+        st.sidebar.caption(f"📏 Разрешение превью: **{img_w}x{img_h}** пикселей")
+        
+        # Дефолтные координаты переводятся из долей в пиксели
+        def_x_min = int(manual_coords[0] * img_w)
+        def_y_min = int(manual_coords[1] * img_h)
+        def_x_max = int(manual_coords[2] * img_w)
+        def_y_max = int(manual_coords[3] * img_h)
+        
+        col1, col2 = st.sidebar.columns(2)
+        x_min = col1.number_input("X min (лево)", min_value=0, max_value=img_w, value=min(def_x_min, img_w), step=10)
+        x_max = col2.number_input("X max (право)", min_value=0, max_value=img_w, value=min(def_x_max, img_w), step=10)
+        y_min = col1.number_input("Y min (верх)", min_value=0, max_value=img_h, value=min(def_y_min, img_h), step=10)
+        y_max = col2.number_input("Y max (низ)", min_value=0, max_value=img_h, value=min(def_y_max, img_h), step=10)
+        
+        if x_min >= x_max:
+            st.sidebar.error("X min должен быть больше или равен X max!")
+        if y_min >= y_max:
+            st.sidebar.error("Y min должен быть больше или равен Y max!")
+            
+        # Нормализуем координаты обратно для LegendDetector
+        manual_coords = [x_min / img_w, y_min / img_h, x_max / img_w, y_max / img_h]
         
     st.sidebar.write("---")
     st.sidebar.subheader("🔍 Настройки детектора")
@@ -453,15 +477,44 @@ def main():
             if not templates_to_search:
                 st.error("Пожалуйста, выберите хотя бы один активный символ (поставив галочку 'Искать?').")
             else:
-                with st.spinner("Выполняется поиск значков на плане..."):
+                # Начинаем пошаговую детекцию с отображением реального прогресса
+                with st.status("Инициализация детекции...", expanded=True) as status:
+                    status.write("Подготовка чертежа и шаблонов...")
+                    progress_bar = st.progress(0.0)
+                    
+                    detections = []
+                    total_items = len(templates_to_search)
+                    
                     try:
-                        detections = run_search_on_drawing(
-                            pdf_path, dpi, templates_to_search, st.session_state['legend_coords'], tm_threshold
-                        )
+                        for idx, (name, t_img) in enumerate(templates_to_search.items()):
+                            status.update(label=f"Поиск символа: '{name}' ({idx + 1} из {total_items})...", state="running")
+                            progress_bar.progress(idx / total_items)
+                            
+                            # Поиск по одному шаблону (из кэша или вживую)
+                            dets = detect_single_template(
+                                pdf_path, dpi, name, t_img, st.session_state['legend_coords'], tm_threshold
+                            )
+                            detections.extend(dets)
+                            
+                        # Склейка результатов и глобальный NMS
+                        status.update(label="Фильтрация пересекающихся рамок (NMS)...", state="running")
+                        progress_bar.progress(1.0)
+                        
+                        from src.postprocessing.nms import non_max_suppression
+                        if detections:
+                            boxes = [d['box'] for d in detections]
+                            scores = [d['score'] for d in detections]
+                            nms_iou = config['detectors']['template_matching'].get('nms_iou_threshold', 0.3)
+                            
+                            keep_indices = non_max_suppression(boxes, scores, iou_threshold=nms_iou)
+                            detections = [detections[i] for i in keep_indices]
+                            
                         st.session_state['detections'] = detections
+                        status.update(label="Поиск успешно завершен!", state="complete", expanded=False)
                         st.success(f"Поиск завершен! Распознано объектов на чертеже: {len(detections)}")
                         st.rerun()
                     except Exception as e:
+                        status.update(label="Произошла ошибка при поиске", state="error", expanded=True)
                         st.error(f"Ошибка во время поиска символов: {e}")
 
         # ШАГ 3: ВЫВОД РЕЗУЛЬТАТОВ ПОИСКА

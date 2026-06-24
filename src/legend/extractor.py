@@ -25,30 +25,31 @@ class LegendExtractor:
         print(f"Размер области легенды для разбора: {w}x{h}")
         
         # 1. Сначала запускаем OCR на всей области легенды, чтобы получить координаты текста
-        # EasyOCR reader.readtext возвращает список: [([[x1,y1], [x2,y1], [x2,y2], [x1,y2]], text, conf), ...]
+        # Препроцессинг: масштабируем картинку в 2 раза для улучшения качества распознавания текста (ГОСТ шрифт)
         try:
-            raw_ocr_results = self.ocr_engine.reader.readtext(legend_image)
+            legend_resized = cv2.resize(legend_image, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
+            raw_ocr_results = self.ocr_engine.reader.readtext(legend_resized)
         except Exception as e:
             print(f"Ошибка EasyOCR при разборе всей легенды: {e}")
             raw_ocr_results = []
             
-        print(f"OCR обнаружил текстовых блоков: {len(raw_ocr_results)}")
+        print(f"OCR обнаружил текстовых блоков (на 2x разрешении): {len(raw_ocr_results)}")
         
         # Фильтруем пустые результаты и сортируем
         ocr_blocks = []
         for bbox, text, conf in raw_ocr_results:
             if conf < 0.25 or not text.strip():
                 continue
-            # Преобразуем bbox в [x_min, y_min, x_max, y_max]
-            xs = [pt[0] for pt in bbox]
-            ys = [pt[1] for pt in bbox]
+            # Преобразуем bbox в [x_min, y_min, x_max, y_max] и делим на 2 для масштабирования к исходному размеру
+            xs = [pt[0] / 2.0 for pt in bbox]
+            ys = [pt[1] / 2.0 for pt in bbox]
             x_min, x_max = int(min(xs)), int(max(xs))
             y_min, y_max = int(min(ys)), int(max(ys))
             ocr_blocks.append({
                 'box': [x_min, y_min, x_max, y_max],
                 'text': text.strip(),
-                'center_y': (y_min + y_max) / 2,
-                'center_x': (x_min + x_max) / 2
+                'center_y': (y_min + y_max) / 2.0,
+                'center_x': (x_min + x_max) / 2.0
             })
             
         # 2. Создаем маску для поиска графических символов

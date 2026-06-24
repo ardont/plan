@@ -1,0 +1,14 @@
+version: '3.8'
+
+services:
+  plan-app:
+    build: .
+    container_name: ardont-plan-ui
+    ports:
+      - "8501:8501"
+    volumes:
+      # Пробрасываем папки для хранения загруженных планов, шаблонов и результатов
+      - ./data:/app/data
+      - ./output:/app/output
+      - ./config:/app/config
+    restart: unless-stopped
