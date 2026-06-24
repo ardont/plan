@@ -1,6 +1,6 @@
 Write-Host "Starting EasyOCR model download from Hugging Face..."
 
-$modelDir = "C:\Users\Acer\.EasyOCR\model"
+$modelDir = "$HOME\.EasyOCR\model"
 
 # Create model directory if not exist
 if (!(Test-Path -Path $modelDir)) {
