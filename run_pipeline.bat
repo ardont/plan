@@ -10,6 +10,9 @@ if not exist .venv (
 :: Activate virtual environment
 call .venv\Scripts\activate
 
+:: Set PYTHONPATH to project root to avoid import issues
+set PYTHONPATH=.
+
 :: Run pipeline passing all arguments
 python main.py %*
 

@@ -10,6 +10,9 @@ if not exist .venv (
 :: Activate virtual environment
 call .venv\Scripts\activate
 
+:: Set PYTHONPATH to project root to avoid import issues
+set PYTHONPATH=.
+
 echo [INFO] Starting Streamlit web interface...
 streamlit run src/ui/app.py
 

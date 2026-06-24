@@ -1,4 +1,8 @@
+import sys
 import os
+# Добавляем корень проекта в sys.path для корректных импортов при запуске через Streamlit
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
+
 import streamlit as st
 import cv2
 import pandas as pd
