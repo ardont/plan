@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+ENV/
+
+# IDEs
+.vscode/
+.idea/
+
+# Данные и результаты (кэш, временные шаблоны, выходные отчеты)
+data/processed/
+data/templates/
+data/synthetic/
+output/
+
+# Исключаем исходные PDF файлы (обычно они слишком тяжелые для Git)
+# Если вам нужно сохранить их в репозитории, закомментируйте строку ниже
+data/raw/*.pdf
+
+# Системные папки ИИ-ассистента
+.gemini/
+*debug_legend.png
+*detected.png
+*.log

@@ -1,0 +1,38 @@
+# Параметры обработки PDF и изображений
+preprocessing:
+  dpi: 300
+
+# Параметры локализации легенды
+legend:
+  auto_detect: true
+  # Если автоопределение не сработало, используются нормализованные координаты (от 0.0 до 1.0)
+  # Формат: [x_min, y_min, x_max, y_max]
+  # Например, правый нижний угол: [0.7, 0.5, 1.0, 1.0]
+  manual_coords: [0.7, 0.5, 1.0, 1.0]
+  # Порог плотности текста для поиска легенды через OCR
+  density_threshold: 0.1
+
+# Параметры распознавания текста (OCR)
+ocr:
+  languages: ['ru']
+  gpu: true
+
+# Параметры детекторов
+detectors:
+  template_matching:
+    threshold: 0.65
+    rotations: [0, 90, 180, 270]
+    nms_iou_threshold: 0.3
+    min_area: 50
+  contour:
+    similarity_threshold: 0.1
+  yolo:
+    model_path: "models/yolo_ugo.pt"
+    confidence: 0.25
+
+# Пути к данным и результатам
+paths:
+  raw_dir: "data/raw"
+  processed_dir: "data/processed"
+  templates_dir: "data/templates"
+  output_dir: "output"
