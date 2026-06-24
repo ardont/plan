@@ -53,7 +53,7 @@ st.markdown("""
         border-left: 5px solid #17b978;
     }
 </style>
-""", unsafe_allowed_html=True)
+""", unsafe_allow_html=True)
 
 # Функция загрузки конфигурации (кэшированная)
 @st.cache_data
@@ -179,7 +179,7 @@ def main():
                 <small>Всего распознано УГО на плане</small>
                 <h1>{len(detections)} шт.</h1>
             </div>
-            """, unsafe_allowed_html=True)
+            """, unsafe_allow_html=True)
             st.write("")
             
             # Таблица
