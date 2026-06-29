@@ -35,14 +35,73 @@ def pdf_to_images(pdf_path, dpi=300):
         images.append(img)
     return images
 
-def get_cached_pdf_image(pdf_path, page_num=0, dpi=300, cache_dir="data/processed"):
+def deskew_image(image):
+    """
+    Автоматическое выравнивание чертежа (устранение перекоса скана).
+    Находит прямые линии с помощью преобразования Хафа, вычисляет медианный угол 
+    и поворачивает изображение в обратную сторону.
+    """
+    if image is None or image.size == 0:
+        return image
+        
+    try:
+        # Переводим в Grayscale для детекции границ
+        if len(image.shape) == 3:
+            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        else:
+            gray = image.copy()
+            
+        # Бинаризация по Otsu для контрастности линий
+        _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        
+        # Детекция краев по методу Кэнни
+        edges = cv2.Canny(thresh, 50, 150, apertureSize=3)
+        
+        # Нахождение линий с помощью вероятностного преобразования Хафа
+        lines = cv2.HoughLinesP(edges, 1, np.pi / 180, threshold=100, minLineLength=100, maxLineGap=10)
+        
+        if lines is None or len(lines) == 0:
+            return image
+            
+        angles = []
+        for line in lines:
+            x1, y1, x2, y2 = line[0]
+            # Вычисляем угол наклона линии в градусах
+            angle = np.arctan2(y2 - y1, x2 - x1) * 180.0 / np.pi
+            # Приводим к отклонению от ближайшего ортогонального направления (0, 90, 180, 270)
+            angle = (angle + 45) % 90 - 45
+            angles.append(angle)
+            
+        # Медианный угол является устойчивой оценкой перекоса всего чертежа
+        median_angle = np.median(angles)
+        
+        # Если перекос незначительный (< 0.05 град.) или неправдоподобно большой (> 15 град.), не выравниваем
+        if abs(median_angle) < 0.05 or abs(median_angle) > 15.0:
+            return image
+            
+        print(f"[INFO] Обнаружен перекос чертежа: {median_angle:.2f} градусов. Выравнивание...")
+        
+        # Поворачиваем чертеж относительно центра
+        h, w = image.shape[:2]
+        center = (w // 2, h // 2)
+        M = cv2.getRotationMatrix2D(center, median_angle, 1.0)
+        
+        # Вращаем и заливаем освободившиеся углы белым цветом (255, 255, 255)
+        rotated = cv2.warpAffine(image, M, (w, h), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_CONSTANT, borderValue=(255, 255, 255))
+        return rotated
+    except Exception as e:
+        print(f"[WARNING] Ошибка при автовыравнивании чертежа (deskew): {e}")
+        return image
+
+def get_cached_pdf_image(pdf_path, page_num=0, dpi=300, cache_dir="data/processed", deskew=True):
     """
     Возвращает изображение страницы PDF. Если файл уже отрендерен и лежит в кэше,
-    загружает его. Иначе рендерит и сохраняет в кэш.
+    загружает его. Иначе рендерит, при необходимости выравнивает перекос, и сохраняет в кэш.
     """
     os.makedirs(cache_dir, exist_ok=True)
     basename = os.path.splitext(os.path.basename(pdf_path))[0]
-    cache_filename = f"{basename}_page{page_num}_dpi{dpi}.png"
+    cache_suffix = "_deskewed" if deskew else ""
+    cache_filename = f"{basename}_page{page_num}_dpi{dpi}{cache_suffix}.png"
     cache_path = os.path.join(cache_dir, cache_filename)
     
     if os.path.exists(cache_path):
@@ -68,6 +127,10 @@ def get_cached_pdf_image(pdf_path, page_num=0, dpi=300, cache_dir="data/processe
         img = cv2.cvtColor(img, cv2.COLOR_RGBA2BGR)
     else:
         img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+        
+    # Выравнивание перекоса скана
+    if deskew:
+        img = deskew_image(img)
         
     # Сохраняем в кэш
     imwrite_unicode(cache_path, img)

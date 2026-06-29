@@ -1,6 +1,7 @@
 # Параметры обработки PDF и изображений
 preprocessing:
   dpi: 300
+  deskew: true
 
 # Параметры локализации легенды
 legend:
@@ -14,15 +15,20 @@ legend:
 
 # Параметры распознавания текста (OCR)
 ocr:
+  engine: 'easyocr'  # 'easyocr' или 'tesseract'
+  tesseract_cmd: ''  # Путь к tesseract.exe для Windows, например: 'C:\Program Files\Tesseract-OCR\tesseract.exe'
   languages: ['ru']
   gpu: true
+
+# Отладочный режим
+debug: false
 
 # Параметры детекторов
 detectors:
   template_matching:
     threshold: 0.65
     rotations: [0, 90, 180, 270]
-    scales: [0.8, 0.9, 1.0, 1.1, 1.2]
+    scales: [0.5, 0.7, 0.9, 1.0, 1.1, 1.3, 1.5]
     coarse_scale_factor: 0.25
     coarse_threshold: 0.5
     num_workers: 4

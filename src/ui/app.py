@@ -62,21 +62,27 @@ def get_config():
     return load_config("config/config.yaml")
 
 # Функция рендеринга и кэширования страницы PDF в памяти Streamlit
-@st.cache_data
-def get_cached_pdf_image_streamlit(pdf_path, page_num, dpi, cache_dir):
-    return get_cached_pdf_image(pdf_path, page_num=page_num, dpi=dpi, cache_dir=cache_dir)
+@st.cache_data(max_entries=3, ttl=3600)
+def get_cached_pdf_image_streamlit(pdf_path, page_num, dpi, cache_dir, deskew=True):
+    return get_cached_pdf_image(pdf_path, page_num=page_num, dpi=dpi, cache_dir=cache_dir, deskew=deskew)
 
 # Функция извлечения легенды (кэшированная)
-@st.cache_data
-def extract_legend_data(pdf_path, dpi, auto_legend, manual_coords):
+@st.cache_data(max_entries=3, ttl=3600)
+def extract_legend_data(pdf_path, dpi, auto_legend, manual_coords, ocr_engine_type, tesseract_cmd, deskew, debug_mode):
     config = get_config()
-    image = get_cached_pdf_image_streamlit(pdf_path, page_num=0, dpi=dpi, cache_dir=config['paths']['processed_dir'])
+    image = get_cached_pdf_image_streamlit(pdf_path, page_num=0, dpi=dpi, cache_dir=config['paths']['processed_dir'], deskew=deskew)
     
     # Клонируем конфиг и переопределяем параметры локализации легенды
     config_run = config.copy()
     config_run['legend'] = config_run.get('legend', {}).copy()
     config_run['legend']['auto_detect'] = auto_legend
     config_run['legend']['manual_coords'] = manual_coords
+    
+    config_run['ocr'] = config_run.get('ocr', {}).copy()
+    config_run['ocr']['engine'] = ocr_engine_type
+    config_run['ocr']['tesseract_cmd'] = tesseract_cmd
+    
+    config_run['debug'] = debug_mode
     
     legend_det = LegendDetector(config_run)
     legend_coords = legend_det.detect(image)
@@ -91,9 +97,9 @@ def extract_legend_data(pdf_path, dpi, auto_legend, manual_coords):
     return legend_coords, templates, extractor.raw_ocr_map
 
 # Функция параллельного поиска всех значков на чертеже
-def detect_all_templates(pdf_path, dpi, templates_dict, legend_coords, tm_threshold):
+def detect_all_templates(pdf_path, dpi, templates_dict, legend_coords, tm_threshold, deskew):
     config = get_config()
-    image = get_cached_pdf_image_streamlit(pdf_path, page_num=0, dpi=dpi, cache_dir=config['paths']['processed_dir'])
+    image = get_cached_pdf_image_streamlit(pdf_path, page_num=0, dpi=dpi, cache_dir=config['paths']['processed_dir'], deskew=deskew)
     
     config_run = config.copy()
     config_run['detectors'] = config_run.get('detectors', {}).copy()
@@ -276,9 +282,40 @@ def main():
     selected_pdf = st.sidebar.selectbox("Выберите чертеж для анализа", pdf_files)
     pdf_path = os.path.join(raw_dir, selected_pdf)
     
+    # Продвинутые параметры обработки
+    st.sidebar.subheader("⚙️ Дополнительные параметры")
+    
+    ocr_engine_default = config.get('ocr', {}).get('engine', 'easyocr')
+    ocr_engine_idx = 1 if ocr_engine_default == 'tesseract' else 0
+    ocr_select = st.sidebar.selectbox(
+        "Движок распознавания (OCR)", 
+        ["EasyOCR (Глубокое обучение)", "Tesseract (Быстрый CPU)"], 
+        index=ocr_engine_idx
+    )
+    ocr_engine_type = 'tesseract' if ocr_select == "Tesseract (Быстрый CPU)" else 'easyocr'
+    
+    tesseract_cmd = st.sidebar.text_input(
+        "Путь к Tesseract OCR (.exe)", 
+        value=config.get('ocr', {}).get('tesseract_cmd', ''),
+        help="Заполните, только если Tesseract не прописан в PATH."
+    )
+    
+    # Валидация наличия Tesseract
+    if ocr_engine_type == 'tesseract':
+        try:
+            import pytesseract
+            if tesseract_cmd:
+                pytesseract.pytesseract.tesseract_cmd = tesseract_cmd
+            pytesseract.get_tesseract_version()
+        except Exception as e:
+            st.sidebar.warning("⚠️ Tesseract не найден в PATH или указан неверный путь. Будет автоматически использован EasyOCR в качестве резервного варианта.")
+            
+    deskew = st.sidebar.checkbox("Автовыравнивание чертежа (Deskew)", value=config.get('preprocessing', {}).get('deskew', True))
+    debug_mode = st.sidebar.checkbox("Сохранять отладочные маски", value=config.get('debug', False))
+    
     # Предварительно загружаем превью чертежа для получения размеров (150 DPI)
     try:
-        preview_img = get_cached_pdf_image_streamlit(pdf_path, page_num=0, dpi=150, cache_dir=config['paths']['processed_dir'])
+        preview_img = get_cached_pdf_image_streamlit(pdf_path, page_num=0, dpi=150, cache_dir=config['paths']['processed_dir'], deskew=deskew)
         img_h, img_w = preview_img.shape[:2]
     except Exception as e:
         st.error(f"Не удалось загрузить предварительный просмотр чертежа: {e}")
@@ -324,8 +361,8 @@ def main():
     tm_threshold = st.sidebar.slider("Порог схожести шаблона", min_value=0.4, max_value=0.9, value=0.65, step=0.05,
                                      help="Снизьте порог, если значки пропускаются. Повысьте порог, если много ложных рамок.")
 
-    # Проверка на изменение параметров кадрирования/файла для сброса кэша легенды
-    current_source = (selected_pdf, dpi, auto_legend, tuple(manual_coords) if not auto_legend else None)
+    # Проверка на изменение параметров кадрирования/файла/OCR/выравнивания для сброса кэша легенды
+    current_source = (selected_pdf, dpi, auto_legend, tuple(manual_coords) if not auto_legend else None, ocr_engine_type, deskew)
     if st.session_state.get('last_source') != current_source:
         st.session_state['legend_items'] = None
         st.session_state['detections'] = None
@@ -360,7 +397,7 @@ def main():
             # Отрендерим превью страницы с направляющими
             try:
                 with st.spinner("Загрузка предварительного просмотра..."):
-                    preview_img = get_cached_pdf_image_streamlit(pdf_path, page_num=0, dpi=150, cache_dir=config['paths']['processed_dir'])
+                    preview_img = get_cached_pdf_image_streamlit(pdf_path, page_num=0, dpi=150, cache_dir=config['paths']['processed_dir'], deskew=deskew)
                     preview_vis = draw_preview_legend(preview_img, auto_legend, manual_coords, config)
                     preview_rgb = cv2.cvtColor(preview_vis, cv2.COLOR_BGR2RGB)
                     st.image(preview_rgb, use_container_width=True, caption=f"План помещения с оверлеем разметки легенды ({selected_pdf})")
@@ -371,7 +408,9 @@ def main():
             if st.button("🔍 Разобрать и проверить легенду", type="primary", use_container_width=True):
                 with st.spinner("Выполняется разбор и сегментация легенды чертежа..."):
                     try:
-                        legend_coords, templates, raw_ocr_map = extract_legend_data(pdf_path, dpi, auto_legend, manual_coords)
+                        legend_coords, templates, raw_ocr_map = extract_legend_data(
+                            pdf_path, dpi, auto_legend, manual_coords, ocr_engine_type, tesseract_cmd, deskew, debug_mode
+                        )
                         
                         if not templates:
                             st.error("Не удалось найти графические значки в указанной области легенды. Проверьте координаты кадрирования.")
@@ -492,7 +531,7 @@ def main():
                         progress_bar.progress(0.3)
                         
                         detections = detect_all_templates(
-                            pdf_path, dpi, templates_to_search, st.session_state['legend_coords'], tm_threshold
+                            pdf_path, dpi, templates_to_search, st.session_state['legend_coords'], tm_threshold, deskew
                         )
                         
                         progress_bar.progress(0.8)
@@ -503,12 +542,27 @@ def main():
                         
                         from src.postprocessing.nms import non_max_suppression
                         if detections:
-                            boxes = [d['box'] for d in detections]
-                            scores = [d['score'] for d in detections]
+                            # Внутриклассовый NMS для слияния результатов
+                            class_groups = {}
+                            for d in detections:
+                                cls = d['class_name']
+                                if cls not in class_groups:
+                                    class_groups[cls] = []
+                                class_groups[cls].append(d)
+                                
+                            filtered_detections = []
                             nms_iou = config['detectors']['template_matching'].get('nms_iou_threshold', 0.3)
                             
-                            keep_indices = non_max_suppression(boxes, scores, iou_threshold=nms_iou)
-                            detections = [detections[i] for i in keep_indices]
+                            for cls, group in class_groups.items():
+                                group.sort(key=lambda x: x['score'], reverse=True)
+                                boxes = [d['box'] for d in group]
+                                scores = [d['score'] for d in group]
+                                
+                                keep_indices = non_max_suppression(boxes, scores, iou_threshold=nms_iou)
+                                for idx in keep_indices:
+                                    filtered_detections.append(group[idx])
+                                    
+                            detections = filtered_detections
                             
                         st.session_state['detections'] = detections
                         status.update(label="Поиск успешно завершен!", state="complete", expanded=False)
@@ -606,7 +660,7 @@ def main():
                 st.subheader("🖼️ Размеченный план чертежа")
                 
                 # Отрисовываем результаты на изображении высокого разрешения
-                image = get_cached_pdf_image_streamlit(pdf_path, page_num=0, dpi=dpi, cache_dir=config['paths']['processed_dir'])
+                image = get_cached_pdf_image_streamlit(pdf_path, page_num=0, dpi=dpi, cache_dir=config['paths']['processed_dir'], deskew=deskew)
                 vis_img = draw_detections(image, detections)
                 
                 # Подсвечиваем область легенды желтой рамкой

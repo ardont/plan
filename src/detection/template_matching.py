@@ -2,6 +2,10 @@ import cv2
 import numpy as np
 from concurrent.futures import ThreadPoolExecutor
 from src.detection.base import BaseDetector
+
+# Отключаем внутреннюю многопоточность OpenCV для предотвращения конфликта потоков (Thread Thrashing)
+# с многопоточным пулом ThreadPoolExecutor в Python.
+cv2.setNumThreads(1)
 from src.postprocessing.nms import non_max_suppression, filter_by_area, filter_by_aspect_ratio
 
 class TemplateMatchingDetector(BaseDetector):
@@ -42,7 +46,12 @@ class TemplateMatchingDetector(BaseDetector):
         h_orig_t, w_orig_t = gray_template.shape[:2]
         
         # 1. Шаг Coarse (грубый проход)
-        # Вычисляем динамический scale factor для грубого прохода, чтобы шаблон не сжимался меньше 12 пикселей
+        # Утолщаем темные линии (применяем эрозию на белом фоне) перед сжатием.
+        # Это предотвращает исчезновение линий толщиной 1-2 пикселя при ресайзе.
+        kernel = np.ones((2, 2), np.uint8)
+        eroded_search = cv2.erode(gray_search, kernel, iterations=1)
+        
+        # Вычисляем динамический scale factor для грубого прохода
         min_coarse_size = 12
         min_dim = min(h_orig_t, w_orig_t)
         
@@ -52,56 +61,64 @@ class TemplateMatchingDetector(BaseDetector):
                 t_coarse_scale = min_coarse_size / min_dim
             else:
                 t_coarse_scale = 1.0 # не сжимаем вообще, если он уже меньше min_coarse_size
-
+ 
         if abs(t_coarse_scale - coarse_scale_factor) < 1e-4:
+            # Предотрендеренная coarse_gray_search уже должна быть размыта (сделаем это в методе detect ниже)
             local_coarse_search = coarse_gray_search
             actual_coarse_scale = coarse_scale_factor
         else:
-            local_coarse_search = cv2.resize(gray_search, (0, 0), fx=t_coarse_scale, fy=t_coarse_scale, interpolation=cv2.INTER_AREA)
+            local_coarse_search = cv2.resize(eroded_search, (0, 0), fx=t_coarse_scale, fy=t_coarse_scale, interpolation=cv2.INTER_AREA)
             actual_coarse_scale = t_coarse_scale
-
+ 
         coarse_candidates = []
+        # Проверяем 3 репрезентативных масштаба на грубом проходе, чтобы не пропустить измененные по масштабу значки
+        coarse_scales_to_test = [0.6, 1.0, 1.4]
         
         for angle in rotations:
             rotated_temp = self.rotate_image(gray_template, angle)
+            # Также утолщаем темные линии на шаблоне
+            eroded_temp = cv2.erode(rotated_temp, kernel, iterations=1)
             
-            # Масштабируем повернутый шаблон для грубого прохода
-            if actual_coarse_scale != 1.0:
-                w_new = int(rotated_temp.shape[1] * actual_coarse_scale)
-                h_new = int(rotated_temp.shape[0] * actual_coarse_scale)
-                if w_new < 5 or h_new < 5:
+            for c_scale in coarse_scales_to_test:
+                combined_scale = actual_coarse_scale * c_scale
+                
+                # Масштабируем повернутый шаблон для грубого прохода
+                if combined_scale != 1.0:
+                    w_new = int(eroded_temp.shape[1] * combined_scale)
+                    h_new = int(eroded_temp.shape[0] * combined_scale)
+                    if w_new < 5 or h_new < 5:
+                        continue
+                    coarse_temp = cv2.resize(eroded_temp, (w_new, h_new), interpolation=cv2.INTER_AREA)
+                else:
+                    coarse_temp = eroded_temp
+                    
+                h_c, w_c = coarse_temp.shape[:2]
+                if h_c > local_coarse_search.shape[0] or w_c > local_coarse_search.shape[1]:
                     continue
-                coarse_temp = cv2.resize(rotated_temp, (w_new, h_new), interpolation=cv2.INTER_AREA)
-            else:
-                coarse_temp = rotated_temp
+                    
+                res = cv2.matchTemplate(local_coarse_search, coarse_temp, cv2.TM_CCOEFF_NORMED)
+                loc = np.where(res >= coarse_threshold)
+                pts = list(zip(*loc[::-1]))
                 
-            h_c, w_c = coarse_temp.shape[:2]
-            if h_c > local_coarse_search.shape[0] or w_c > local_coarse_search.shape[1]:
-                continue
+                if len(pts) > 2000:
+                    # Защита от переполнения при шуме
+                    scores_pts = [float(res[pt[1], pt[0]]) for pt in pts]
+                    sorted_idx = np.argsort(scores_pts)[::-1][:2000]
+                    pts = [pts[i] for i in sorted_idx]
                 
-            res = cv2.matchTemplate(local_coarse_search, coarse_temp, cv2.TM_CCOEFF_NORMED)
-            loc = np.where(res >= coarse_threshold)
-            pts = list(zip(*loc[::-1]))
-            
-            if len(pts) > 2000:
-                # Защита от переполнения при шуме
-                scores_pts = [float(res[pt[1], pt[0]]) for pt in pts]
-                sorted_idx = np.argsort(scores_pts)[::-1][:2000]
-                pts = [pts[i] for i in sorted_idx]
-            
-            for pt in pts:
-                score = float(res[pt[1], pt[0]])
-                box = [pt[0], pt[1], pt[0] + w_c, pt[1] + h_c]
-                coarse_candidates.append({
-                    'box': box,
-                    'score': score,
-                    'angle': angle
-                })
-
+                for pt in pts:
+                    score = float(res[pt[1], pt[0]])
+                    box = [pt[0], pt[1], pt[0] + w_c, pt[1] + h_c]
+                    coarse_candidates.append({
+                        'box': box,
+                        'score': score,
+                        'angle': angle
+                    })
+ 
         # Если на грубом проходе ничего не найдено - выходим досрочно (Early Exit)
         if not coarse_candidates:
             return []
-
+ 
         # Фильтруем дубликаты кандидатов на грубом масштабе с помощью NMS
         coarse_boxes = [c['box'] for c in coarse_candidates]
         coarse_scores = [c['score'] for c in coarse_candidates]
@@ -212,9 +229,14 @@ class TemplateMatchingDetector(BaseDetector):
         # Для matchTemplate лучше использовать grayscale-изображения
         gray_search = cv2.cvtColor(search_img, cv2.COLOR_BGR2GRAY)
         
+        # Утолщаем темные линии (применяем эрозию на белом фоне) перед сжатием.
+        # Это предотвращает исчезновение линий толщиной 1-2 пикселя при ресайзе.
+        kernel = np.ones((2, 2), np.uint8)
+        eroded_search = cv2.erode(gray_search, kernel, iterations=1)
+        
         # Глобальный грубый чертеж
         coarse_gray_search = cv2.resize(
-            gray_search, (0, 0), fx=coarse_scale_factor, fy=coarse_scale_factor, interpolation=cv2.INTER_AREA
+            eroded_search, (0, 0), fx=coarse_scale_factor, fy=coarse_scale_factor, interpolation=cv2.INTER_AREA
         )
         
         all_results = []
@@ -267,16 +289,33 @@ class TemplateMatchingDetector(BaseDetector):
         if len(all_boxes) == 0:
             return []
             
-        # Применяем NMS для удаления дубликатов
-        keep_indices = non_max_suppression(all_boxes, all_scores, iou_threshold=nms_iou)
-        
-        # Формируем итоговый список детекций
-        detections = []
-        for idx in keep_indices:
-            detections.append({
+        # Применяем внутриклассовый NMS (intra-class NMS), чтобы не затирать близко расположенные значки разных классов.
+        # Группируем кандидатов по их классам:
+        class_groups = {}
+        for idx, class_name in enumerate(all_classes):
+            if class_name not in class_groups:
+                class_groups[class_name] = []
+            class_groups[class_name].append({
                 'box': all_boxes[idx],
-                'class_name': all_classes[idx],
-                'score': all_scores[idx]
+                'score': all_scores[idx],
+                'idx': idx
             })
+            
+        detections = []
+        for class_name, group in class_groups.items():
+            # Сортируем внутри класса по уверенности (уже сделано в NMS, но полезно для ясности)
+            group.sort(key=lambda x: x['score'], reverse=True)
+            
+            boxes_cls = [x['box'] for x in group]
+            scores_cls = [x['score'] for x in group]
+            
+            keep_indices_cls = non_max_suppression(boxes_cls, scores_cls, iou_threshold=nms_iou)
+            for k in keep_indices_cls:
+                item = group[k]
+                detections.append({
+                    'box': item['box'],
+                    'class_name': class_name,
+                    'score': item['score']
+                })
             
         return detections

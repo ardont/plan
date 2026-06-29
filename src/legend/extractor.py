@@ -1,5 +1,7 @@
+import os
 import cv2
 import numpy as np
+from src.utils import imwrite_unicode
 
 class LegendExtractor:
     """
@@ -51,10 +53,10 @@ class LegendExtractor:
             # EasyOCR лучше работает с RGB
             img_rgb = cv2.cvtColor(processed_gray, cv2.COLOR_GRAY2RGB)
             
-            # Запускаем EasyOCR с allowlist
-            raw_ocr_results = self.ocr_engine.reader.readtext(img_rgb, allowlist=self.ocr_engine.allowlist)
+            # Запускаем распознавание текста
+            raw_ocr_results = self.ocr_engine.read_text_blocks(img_rgb)
         except Exception as e:
-            print(f"Ошибка EasyOCR при разборе всей легенды: {e}")
+            print(f"Ошибка OCR при разборе всей легенды: {e}")
             raw_ocr_results = []
             
         print(f"OCR обнаружил текстовых блоков (на 2x разрешении): {len(raw_ocr_results)}")
@@ -100,6 +102,17 @@ class LegendExtractor:
         vert_lines = cv2.morphologyEx(clean_thresh, cv2.MORPH_OPEN, vert_kernel)
         clean_thresh = cv2.subtract(clean_thresh, vert_lines)
         
+        # Сохранение отладочных масок легенды в output/debug/ при включенном режиме дебага
+        if self.config.get('debug', False):
+            try:
+                debug_dir = os.path.join(self.config['paths'].get('output_dir', 'output'), 'debug')
+                os.makedirs(debug_dir, exist_ok=True)
+                imwrite_unicode(os.path.join(debug_dir, "legend_thresh.png"), thresh)
+                imwrite_unicode(os.path.join(debug_dir, "legend_clean_thresh.png"), clean_thresh)
+                print(f"[DEBUG] Сохранены отладочные маски легенды в {debug_dir}")
+            except Exception as e:
+                print(f"[WARNING] Не удалось сохранить отладочные маски легенды: {e}")
+        
         # 3. Находим графические контуры (значки)
         contours, _ = cv2.findContours(clean_thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         
@@ -138,35 +151,53 @@ class LegendExtractor:
         
         templates = {}
         
-        # 4. Сопоставляем каждый значок с текстовыми блоками
-        # Для каждого значка ищем текстовые блоки, лежащие примерно на той же высоте (по Y) и справа от него
-        for icon in icons:
-            ix1, iy1, ix2, iy2 = icon['box']
-            icon_cy = icon['center_y']
-            icon_height = iy2 - iy1
+        # 4. Сопоставляем каждый текстовый блок с ближайшим значком (взвешенный K-NN)
+        icon_matches = {i: [] for i in range(len(icons))}
+        
+        for block in ocr_blocks:
+            tx1, ty1, tx2, ty2 = block['box']
+            block_cx = block['center_x']
+            block_cy = block['center_y']
             
-            # Находим текстовые блоки на той же горизонтальной линии
-            matched_text_blocks = []
-            for block in ocr_blocks:
-                tx1, ty1, tx2, ty2 = block['box']
-                block_cy = block['center_y']
+            best_icon_idx = -1
+            min_cost = 999999.0
+            
+            for idx, icon in enumerate(icons):
+                ix1, iy1, ix2, iy2 = icon['box']
+                icon_cx = icon['center_x']
+                icon_cy = icon['center_y']
                 
-                # Критерий 1: Текст находится справа от значка
-                if tx1 < ix1:
+                # Текст должен находиться справа от левого края значка (с небольшим допуском)
+                if tx1 < ix1 - 5:
                     continue
                     
-                # Разница по Y не должна превышать высоту значка
-                y_dist = abs(icon_cy - block_cy)
-                max_allowed_dist = max(icon_height * 0.6, 12)
+                # Расстояние по горизонтали (от правого края значка)
+                dx = max(0.0, tx1 - ix2)
+                # Расстояние по вертикали
+                dy = abs(block_cy - icon_cy)
                 
-                if y_dist <= max_allowed_dist:
-                    matched_text_blocks.append(block)
-                    
+                # Взвешенная стоимость: вертикальное смещение наказывается в 5 раз сильнее
+                cost = dx + 5.0 * dy
+                
+                # Максимальный радиус привязки текста к УГО (350 пикселей стоимости)
+                if cost < min_cost and cost < 350.0:
+                    min_cost = cost
+                    best_icon_idx = idx
+            
+            if best_icon_idx != -1:
+                icon_matches[best_icon_idx].append(block)
+                
+        # 5. Обрабатываем сопоставленные группы
+        for idx, icon in enumerate(icons):
+            ix1, iy1, ix2, iy2 = icon['box']
+            matched_text_blocks = icon_matches[idx]
+            
             if not matched_text_blocks:
                 continue
                 
-            # Сортируем текстовые блоки слева направо (по X), чтобы правильно склеить слова в строку
-            matched_text_blocks.sort(key=lambda b: b['box'][0])
+            # Сортируем блоки: сначала по строкам (Y с допуском 12px), затем по горизонтали (X)
+            # Это обеспечивает правильный порядок чтения для многострочных подписей
+            matched_text_blocks.sort(key=lambda b: (b['center_y'] // 12, b['box'][0]))
             
             # Склеиваем слова
             raw_description = " ".join([b['text'] for b in matched_text_blocks])
@@ -175,8 +206,7 @@ class LegendExtractor:
             if not description:
                 continue
                 
-            # 5. Вырезаем чистый значок из исходного цветного изображения
-            # Добавляем отступ в 1 пиксель, если возможно
+            # Вырезаем чистый значок из исходного цветного изображения
             pad = 1
             x_min = max(0, ix1 - pad)
             y_min = max(0, iy1 - pad)
@@ -191,7 +221,7 @@ class LegendExtractor:
             if clean_template is not None and clean_template.size > 0:
                 templates[description] = clean_template
                 self.raw_ocr_map[description] = raw_description
-                print(f"Успешно сопоставлено: raw='{raw_description}' -> clean='{description}' -> Шаблон {clean_template.shape[1]}x{clean_template.shape[0]}")
+                print(f"Успешно сопоставлено (Weighted K-NN): raw='{raw_description}' -> clean='{description}' -> Шаблон {clean_template.shape[1]}x{clean_template.shape[0]}")
                 
         # Если продвинутый метод сопоставления свободных контуров не нашел ничего, 
         # откатываемся к простому табличному методу по сетке горизонтальных линий

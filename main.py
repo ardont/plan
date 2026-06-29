@@ -36,6 +36,9 @@ def run_pipeline(pdf_path, config_path="config/config.yaml"):
     
     # Обрабатываем первую страницу чертежа (как основную)
     image = images[0]
+    if config.get('preprocessing', {}).get('deskew', True):
+        from src.preprocessing.pdf_converter import deskew_image
+        image = deskew_image(image)
     
     # 3. Обнаружение легенды
     print("Шаг 2: Локализация легенды...")
