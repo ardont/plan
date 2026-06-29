@@ -2,6 +2,7 @@ import os
 import cv2
 import numpy as np
 import fitz  # PyMuPDF
+from src.utils import imread_unicode, imwrite_unicode
 
 def pdf_to_images(pdf_path, dpi=300):
     """
@@ -46,7 +47,7 @@ def get_cached_pdf_image(pdf_path, page_num=0, dpi=300, cache_dir="data/processe
     
     if os.path.exists(cache_path):
         print(f"Загрузка страницы {page_num} из кэша: {cache_path}")
-        img = cv2.imread(cache_path)
+        img = imread_unicode(cache_path)
         if img is not None:
             return img
             
@@ -69,6 +70,6 @@ def get_cached_pdf_image(pdf_path, page_num=0, dpi=300, cache_dir="data/processe
         img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
         
     # Сохраняем в кэш
-    cv2.imwrite(cache_path, img)
+    imwrite_unicode(cache_path, img)
     print(f"Изображение сохранено в кэш: {cache_path}")
     return img

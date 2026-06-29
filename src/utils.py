@@ -1,11 +1,37 @@
 import yaml
 import cv2
 import numpy as np
+import os
 
 def load_config(config_path="config/config.yaml"):
     """Загрузка конфигурационного файла YAML."""
     with open(config_path, "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
+
+def imread_unicode(path, flags=cv2.IMREAD_COLOR):
+    """Чтение изображения из пути с поддержкой кириллицы и юникода на Windows."""
+    try:
+        with open(path, 'rb') as f:
+            nparr = np.frombuffer(f.read(), np.uint8)
+            return cv2.imdecode(nparr, flags)
+    except Exception as e:
+        print(f"Ошибка чтения изображения с юникод-путем {path}: {e}")
+        return None
+
+def imwrite_unicode(path, img, params=None):
+    """Запись изображения по пути с поддержкой кириллицы и юникода на Windows."""
+    try:
+        ext = os.path.splitext(path)[1]
+        result, nparr = cv2.imencode(ext, img, params)
+        if result:
+            os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+            with open(path, 'wb') as f:
+                f.write(nparr.tobytes())
+            return True
+        return False
+    except Exception as e:
+        print(f"Ошибка записи изображения с юникод-путем {path}: {e}")
+        return False
 
 def draw_detections(image, detections):
     """

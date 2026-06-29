@@ -8,7 +8,8 @@ from src.legend.ocr_engine import OCREngine
 from src.legend.extractor import LegendExtractor
 from src.detection.template_matching import TemplateMatchingDetector
 from src.postprocessing.nms import filter_by_area
-from src.utils import load_config, draw_detections
+from src.postprocessing.pdf_generator import generate_pdf_report
+from src.utils import load_config, draw_detections, imwrite_unicode
 
 def run_pipeline(pdf_path, config_path="config/config.yaml"):
     """
@@ -45,7 +46,7 @@ def run_pipeline(pdf_path, config_path="config/config.yaml"):
     legend_image = image[y_min:y_max, x_min:x_max]
     
     # Сохраняем вырезанную легенду для отладки
-    cv2.imwrite(os.path.join(output_dir, "debug_legend.png"), legend_image)
+    imwrite_unicode(os.path.join(output_dir, "debug_legend.png"), legend_image)
     
     # 4. Инициализация OCR и извлечение шаблонов из легенды
     print("Шаг 3: Инициализация OCR и разбор легенды...")
@@ -62,7 +63,7 @@ def run_pipeline(pdf_path, config_path="config/config.yaml"):
     os.makedirs(debug_templates_dir, exist_ok=True)
     for name, t_img in templates.items():
         clean_name = "".join([c if c.isalnum() or c in ' _-' else '_' for c in name])
-        cv2.imwrite(os.path.join(debug_templates_dir, f"{clean_name}.png"), t_img)
+        imwrite_unicode(os.path.join(debug_templates_dir, f"{clean_name}.png"), t_img)
         
     # 5. Детекция условных обозначений на чертеже
     print("Шаг 4: Поиск условных обозначений на чертеже...")
@@ -93,7 +94,7 @@ def run_pipeline(pdf_path, config_path="config/config.yaml"):
     # Визуализация с рамками
     vis_image = draw_detections(image, detections)
     vis_path = os.path.join(output_dir, f"{basename}_detected.png")
-    cv2.imwrite(vis_path, vis_image)
+    imwrite_unicode(vis_path, vis_image)
     print(f"Изображение с разметкой сохранено: {vis_path}")
     
     # Экспорт в JSON
@@ -120,6 +121,10 @@ def run_pipeline(pdf_path, config_path="config/config.yaml"):
     df = pd.DataFrame(list(counts.items()), columns=["Название символа", "Количество на плане"])
     df.to_excel(excel_path, index=False)
     print(f"Excel отчет сохранен: {excel_path}")
+    
+    # Экспорт в PDF
+    pdf_path_out = os.path.join(output_dir, f"{basename}_report.pdf")
+    generate_pdf_report(os.path.basename(pdf_path), report_data, pdf_path_out)
     
     return report_data
 

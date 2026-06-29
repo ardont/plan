@@ -22,6 +22,10 @@ detectors:
   template_matching:
     threshold: 0.65
     rotations: [0, 90, 180, 270]
+    scales: [0.8, 0.9, 1.0, 1.1, 1.2]
+    coarse_scale_factor: 0.25
+    coarse_threshold: 0.5
+    num_workers: 4
     nms_iou_threshold: 0.3
     min_area: 50
   contour:

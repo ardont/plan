@@ -10,6 +10,8 @@ class LegendExtractor:
     def __init__(self, config, ocr_engine):
         self.config = config
         self.ocr_engine = ocr_engine
+        from src.postprocessing.spell_corrector import SpellCorrector
+        self.spell_corrector = SpellCorrector()
 
     def extract_templates(self, legend_image):
         """
@@ -28,7 +30,28 @@ class LegendExtractor:
         # Препроцессинг: масштабируем картинку в 2 раза для улучшения качества распознавания текста (ГОСТ шрифт)
         try:
             legend_resized = cv2.resize(legend_image, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
-            raw_ocr_results = self.ocr_engine.reader.readtext(legend_resized)
+            
+            # Переводим в grayscale для бинаризации и морфологии
+            if len(legend_resized.shape) == 3 and legend_resized.shape[2] == 3:
+                gray = cv2.cvtColor(legend_resized, cv2.COLOR_BGR2GRAY)
+            else:
+                gray = legend_resized.copy()
+                
+            # Бинаризация (белый текст на черном фоне)
+            _, thresh_ocr = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+            
+            # Утолщаем линии с помощью Dilation (ядро 2x2, 1 итерация)
+            kernel = np.ones((2, 2), np.uint8)
+            dilate = cv2.dilate(thresh_ocr, kernel, iterations=1)
+            
+            # Возвращаем обратно: черный текст на белом фоне
+            processed_gray = cv2.bitwise_not(dilate)
+            
+            # EasyOCR лучше работает с RGB
+            img_rgb = cv2.cvtColor(processed_gray, cv2.COLOR_GRAY2RGB)
+            
+            # Запускаем EasyOCR с allowlist
+            raw_ocr_results = self.ocr_engine.reader.readtext(img_rgb, allowlist=self.ocr_engine.allowlist)
         except Exception as e:
             print(f"Ошибка EasyOCR при разборе всей легенды: {e}")
             raw_ocr_results = []
@@ -118,10 +141,9 @@ class LegendExtractor:
                 if tx1 < ix1:
                     continue
                     
-                # Критерий 2: Текст находится на близкой высоте по Y
-                # Разница по Y не должна превышать высоту значка или высоту текстового блока
+                # Разница по Y не должна превышать высоту значка
                 y_dist = abs(icon_cy - block_cy)
-                max_allowed_dist = max(icon_height * 1.2, (ty2 - ty1) * 1.2, 20)
+                max_allowed_dist = max(icon_height * 0.6, 12)
                 
                 if y_dist <= max_allowed_dist:
                     matched_text_blocks.append(block)
@@ -269,4 +291,5 @@ class LegendExtractor:
         text = text.replace('\n', ' ')
         text = " ".join(text.split())
         text = text.lstrip(".-:•* ")
-        return text.strip()
+        cleaned = text.strip()
+        return self.spell_corrector.correct_text(cleaned)

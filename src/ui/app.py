@@ -11,7 +11,7 @@ import io
 import json
 
 # Импорты модулей системы
-from src.utils import load_config, draw_detections
+from src.utils import load_config, draw_detections, imread_unicode, imwrite_unicode
 from src.preprocessing.pdf_converter import get_cached_pdf_image
 from src.legend.detector import LegendDetector
 from src.legend.ocr_engine import OCREngine
@@ -61,11 +61,16 @@ st.markdown("""
 def get_config():
     return load_config("config/config.yaml")
 
+# Функция рендеринга и кэширования страницы PDF в памяти Streamlit
+@st.cache_data
+def get_cached_pdf_image_streamlit(pdf_path, page_num, dpi, cache_dir):
+    return get_cached_pdf_image(pdf_path, page_num=page_num, dpi=dpi, cache_dir=cache_dir)
+
 # Функция извлечения легенды (кэшированная)
 @st.cache_data
 def extract_legend_data(pdf_path, dpi, auto_legend, manual_coords):
     config = get_config()
-    image = get_cached_pdf_image(pdf_path, page_num=0, dpi=dpi, cache_dir=config['paths']['processed_dir'])
+    image = get_cached_pdf_image_streamlit(pdf_path, page_num=0, dpi=dpi, cache_dir=config['paths']['processed_dir'])
     
     # Клонируем конфиг и переопределяем параметры локализации легенды
     config_run = config.copy()
@@ -85,11 +90,10 @@ def extract_legend_data(pdf_path, dpi, auto_legend, manual_coords):
     templates = extractor.extract_templates(legend_image)
     return legend_coords, templates
 
-# Функция поиска одного значка на чертеже (кэшированная)
-@st.cache_data
-def detect_single_template(pdf_path, dpi, name, t_img, legend_coords, tm_threshold):
+# Функция параллельного поиска всех значков на чертеже
+def detect_all_templates(pdf_path, dpi, templates_dict, legend_coords, tm_threshold):
     config = get_config()
-    image = get_cached_pdf_image(pdf_path, page_num=0, dpi=dpi, cache_dir=config['paths']['processed_dir'])
+    image = get_cached_pdf_image_streamlit(pdf_path, page_num=0, dpi=dpi, cache_dir=config['paths']['processed_dir'])
     
     config_run = config.copy()
     config_run['detectors'] = config_run.get('detectors', {}).copy()
@@ -97,8 +101,9 @@ def detect_single_template(pdf_path, dpi, name, t_img, legend_coords, tm_thresho
     config_run['detectors']['template_matching']['threshold'] = tm_threshold
     
     detector = TemplateMatchingDetector(config_run)
-    detections = detector.detect(image, {name: t_img}, exclude_region=legend_coords)
+    detections = detector.detect(image, templates_dict, exclude_region=legend_coords)
     return detections
+
 
 def list_available_presets(config):
     """
@@ -135,7 +140,7 @@ def load_template_preset(preset_name, config):
         img_path = os.path.join(preset_dir, filename)
         
         # cv2.imread загружает изображение в BGR
-        image_np = cv2.imread(img_path)
+        image_np = imread_unicode(img_path)
         if image_np is not None:
             legend_items.append({
                 'id': item_data['id'],
@@ -161,7 +166,7 @@ def save_template_preset(preset_name, legend_items, config):
             img_path = os.path.join(preset_dir, filename)
             
             # Сохраняем BGR-изображение напрямую через opencv
-            cv2.imwrite(img_path, item['image_np'])
+            imwrite_unicode(img_path, item['image_np'])
             
             preset_items.append({
                 "id": item['id'],
@@ -273,7 +278,7 @@ def main():
     
     # Предварительно загружаем превью чертежа для получения размеров (150 DPI)
     try:
-        preview_img = get_cached_pdf_image(pdf_path, page_num=0, dpi=150, cache_dir=config['paths']['processed_dir'])
+        preview_img = get_cached_pdf_image_streamlit(pdf_path, page_num=0, dpi=150, cache_dir=config['paths']['processed_dir'])
         img_h, img_w = preview_img.shape[:2]
     except Exception as e:
         st.error(f"Не удалось загрузить предварительный просмотр чертежа: {e}")
@@ -355,7 +360,7 @@ def main():
             # Отрендерим превью страницы с направляющими
             try:
                 with st.spinner("Загрузка предварительного просмотра..."):
-                    preview_img = get_cached_pdf_image(pdf_path, page_num=0, dpi=150, cache_dir=config['paths']['processed_dir'])
+                    preview_img = get_cached_pdf_image_streamlit(pdf_path, page_num=0, dpi=150, cache_dir=config['paths']['processed_dir'])
                     preview_vis = draw_preview_legend(preview_img, auto_legend, manual_coords, config)
                     preview_rgb = cv2.cvtColor(preview_vis, cv2.COLOR_BGR2RGB)
                     st.image(preview_rgb, use_container_width=True, caption=f"План помещения с оверлеем разметки легенды ({selected_pdf})")
@@ -477,24 +482,20 @@ def main():
             if not templates_to_search:
                 st.error("Пожалуйста, выберите хотя бы один активный символ (поставив галочку 'Искать?').")
             else:
-                # Начинаем пошаговую детекцию с отображением реального прогресса
-                with st.status("Инициализация детекции...", expanded=True) as status:
-                    status.write("Подготовка чертежа и шаблонов...")
-                    progress_bar = st.progress(0.0)
-                    
-                    detections = []
-                    total_items = len(templates_to_search)
+                # Запуск параллельного поиска шаблонов
+                with st.status("Поиск условных обозначений на чертеже...", expanded=True) as status:
+                    status.write("Инициализация параллельного поиска...")
+                    progress_bar = st.progress(0.1)
                     
                     try:
-                        for idx, (name, t_img) in enumerate(templates_to_search.items()):
-                            status.update(label=f"Поиск символа: '{name}' ({idx + 1} из {total_items})...", state="running")
-                            progress_bar.progress(idx / total_items)
-                            
-                            # Поиск по одному шаблону (из кэша или вживую)
-                            dets = detect_single_template(
-                                pdf_path, dpi, name, t_img, st.session_state['legend_coords'], tm_threshold
-                            )
-                            detections.extend(dets)
+                        status.update(label="Поиск всех УГО на чертеже в параллельном режиме...", state="running")
+                        progress_bar.progress(0.3)
+                        
+                        detections = detect_all_templates(
+                            pdf_path, dpi, templates_to_search, st.session_state['legend_coords'], tm_threshold
+                        )
+                        
+                        progress_bar.progress(0.8)
                             
                         # Склейка результатов и глобальный NMS
                         status.update(label="Фильтрация пересекающихся рамок (NMS)...", state="running")
@@ -605,7 +606,7 @@ def main():
                 st.subheader("🖼️ Размеченный план чертежа")
                 
                 # Отрисовываем результаты на изображении высокого разрешения
-                image = get_cached_pdf_image(pdf_path, page_num=0, dpi=dpi, cache_dir=config['paths']['processed_dir'])
+                image = get_cached_pdf_image_streamlit(pdf_path, page_num=0, dpi=dpi, cache_dir=config['paths']['processed_dir'])
                 vis_img = draw_detections(image, detections)
                 
                 # Подсвечиваем область легенды желтой рамкой
@@ -618,7 +619,7 @@ def main():
                 
                 # Сохранение на диск размеченной картинки
                 vis_path = os.path.join(output_dir, f"{basename}_detected.png")
-                cv2.imwrite(vis_path, vis_img)
+                imwrite_unicode(vis_path, vis_img)
                 
                 # Скачивание размеченной картинки
                 _, img_encoded = cv2.imencode('.png', vis_img)
