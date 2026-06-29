@@ -12,6 +12,7 @@ class LegendExtractor:
         self.ocr_engine = ocr_engine
         from src.postprocessing.spell_corrector import SpellCorrector
         self.spell_corrector = SpellCorrector()
+        self.raw_ocr_map = {}
 
     def extract_templates(self, legend_image):
         """
@@ -102,12 +103,25 @@ class LegendExtractor:
         # 3. Находим графические контуры (значки)
         contours, _ = cv2.findContours(clean_thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         
+        # Настройки фильтрации мусора
+        MIN_ICON_SIZE = 20         # Минимальная ширина/высота в пикселях
+        MAX_ASPECT_RATIO = 3.0     # Максимальное отношение сторон (отсекает длинные тонкие рамки/линии)
+        
         icons = []
         for cnt in contours:
             x, y, box_w, box_h = cv2.boundingRect(cnt)
             
-            # Отсекаем слишком мелкий шум и слишком огромные объекты
-            if box_w < 5 or box_h < 5 or box_w > w * 0.25 or box_h > h * 0.2:
+            # 1. ФИЛЬТР РАЗМЕРА: Отсекаем точки, запятые и мелкий шум (например, 4x4, 4x7)
+            if box_w < MIN_ICON_SIZE or box_h < MIN_ICON_SIZE:
+                continue
+                
+            # Отсекаем слишком огромные объекты
+            if box_w > w * 0.25 or box_h > h * 0.2:
+                continue
+                
+            # 2. ФИЛЬТР СООТНОШЕНИЯ СТОРОН: Отсекаем длинные разделительные линии таблиц
+            aspect_ratio = box_w / float(box_h)
+            if aspect_ratio > MAX_ASPECT_RATIO or aspect_ratio < (1.0 / MAX_ASPECT_RATIO):
                 continue
                 
             # Проверяем, что значок лежит в левой половине легенды (УГО обычно слева)
@@ -155,8 +169,8 @@ class LegendExtractor:
             matched_text_blocks.sort(key=lambda b: b['box'][0])
             
             # Склеиваем слова
-            description = " ".join([b['text'] for b in matched_text_blocks])
-            description = self._clean_text(description)
+            raw_description = " ".join([b['text'] for b in matched_text_blocks])
+            description = self._clean_text(raw_description)
             
             if not description:
                 continue
@@ -176,7 +190,8 @@ class LegendExtractor:
             
             if clean_template is not None and clean_template.size > 0:
                 templates[description] = clean_template
-                print(f"Успешно сопоставлено: '{description}' -> Шаблон {clean_template.shape[1]}x{clean_template.shape[0]}")
+                self.raw_ocr_map[description] = raw_description
+                print(f"Успешно сопоставлено: raw='{raw_description}' -> clean='{description}' -> Шаблон {clean_template.shape[1]}x{clean_template.shape[0]}")
                 
         # Если продвинутый метод сопоставления свободных контуров не нашел ничего, 
         # откатываемся к простому табличному методу по сетке горизонтальных линий
@@ -225,14 +240,20 @@ class LegendExtractor:
             if template_img is None:
                 continue
                 
+            # Фильтр размера для табличной нарезки
+            th, tw = template_img.shape[:2]
+            if tw < 20 or th < 20:
+                continue
+                
             # Распознаем текст
-            text_desc = self.ocr_engine.extract_text(text_area)
-            text_desc = self._clean_text(text_desc)
+            raw_text_desc = self.ocr_engine.extract_text(text_area)
+            text_desc = self._clean_text(raw_text_desc)
             
             if not text_desc:
                 text_desc = f"Символ_Строка_{i+1}"
                 
             templates[text_desc] = template_img
+            self.raw_ocr_map[text_desc] = raw_text_desc
             
         return templates
 

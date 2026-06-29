@@ -88,7 +88,7 @@ def extract_legend_data(pdf_path, dpi, auto_legend, manual_coords):
     extractor = LegendExtractor(config_run, ocr_engine)
     
     templates = extractor.extract_templates(legend_image)
-    return legend_coords, templates
+    return legend_coords, templates, extractor.raw_ocr_map
 
 # Функция параллельного поиска всех значков на чертеже
 def detect_all_templates(pdf_path, dpi, templates_dict, legend_coords, tm_threshold):
@@ -371,7 +371,7 @@ def main():
             if st.button("🔍 Разобрать и проверить легенду", type="primary", use_container_width=True):
                 with st.spinner("Выполняется разбор и сегментация легенды чертежа..."):
                     try:
-                        legend_coords, templates = extract_legend_data(pdf_path, dpi, auto_legend, manual_coords)
+                        legend_coords, templates, raw_ocr_map = extract_legend_data(pdf_path, dpi, auto_legend, manual_coords)
                         
                         if not templates:
                             st.error("Не удалось найти графические значки в указанной области легенды. Проверьте координаты кадрирования.")
@@ -388,7 +388,7 @@ def main():
                             legend_items.append({
                                 'id': idx + 1,
                                 'image_np': t_img,
-                                'raw_text': name,
+                                'raw_text': raw_ocr_map.get(name, name),
                                 'label': name,
                                 'enabled': not is_noise
                             })
