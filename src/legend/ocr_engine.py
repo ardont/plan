@@ -14,8 +14,8 @@ class OCREngine:
         self.tesseract_cmd = self.ocr_config.get('tesseract_cmd', '')
         
         self.easyocr_reader = None
-        # Белый список символов для фильтрации шума при распознавании ГОСТ шрифтов
-        self.allowlist = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyzАБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯабвгдеёжзийклмнопрстуфхцчшщъыьэюя0123456789 -.,()/'
+        # Белый список символов для фильтрации шума при распознавании ГОСТ шрифтов (только кириллическое начертание, цифры и спецсимволы)
+        self.allowlist = 'АБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯабвгдеёжзийклмнопрстуфхцчшщъыьэюя0123456789 -.,()/'
 
     def _get_easyocr_reader(self):
         """Ленивая инициализация EasyOCR."""

@@ -1,3 +1,4 @@
+import os
 import cv2
 import numpy as np
 from concurrent.futures import ThreadPoolExecutor
@@ -46,10 +47,15 @@ class TemplateMatchingDetector(BaseDetector):
         h_orig_t, w_orig_t = gray_template.shape[:2]
         
         # 1. Шаг Coarse (грубый проход)
-        # Утолщаем темные линии (применяем эрозию на белом фоне) перед сжатием.
-        # Это предотвращает исчезновение линий толщиной 1-2 пикселя при ресайзе.
-        kernel = np.ones((2, 2), np.uint8)
-        eroded_search = cv2.erode(gray_search, kernel, iterations=1)
+        tm_config = self.config.get('detectors', {}).get('template_matching', {})
+        use_morphology = tm_config.get('use_morphology', True)
+        
+        # Утолщаем темные линии (применяем эрозию на белом фоне) перед сжатием, если это включено.
+        if use_morphology:
+            kernel = np.ones((2, 2), np.uint8)
+            eroded_search = cv2.erode(gray_search, kernel, iterations=1)
+        else:
+            eroded_search = gray_search.copy()
         
         # Вычисляем динамический scale factor для грубого прохода
         min_coarse_size = 12
@@ -63,7 +69,7 @@ class TemplateMatchingDetector(BaseDetector):
                 t_coarse_scale = 1.0 # не сжимаем вообще, если он уже меньше min_coarse_size
  
         if abs(t_coarse_scale - coarse_scale_factor) < 1e-4:
-            # Предотрендеренная coarse_gray_search уже должна быть размыта (сделаем это в методе detect ниже)
+            # Предотрендеренная coarse_gray_search уже должна быть обработана (сделаем это в методе detect ниже)
             local_coarse_search = coarse_gray_search
             actual_coarse_scale = coarse_scale_factor
         else:
@@ -71,13 +77,24 @@ class TemplateMatchingDetector(BaseDetector):
             actual_coarse_scale = t_coarse_scale
  
         coarse_candidates = []
-        # Проверяем 3 репрезентативных масштаба на грубом проходе, чтобы не пропустить измененные по масштабу значки
-        coarse_scales_to_test = [0.6, 1.0, 1.4]
+        # Составляем репрезентативные масштабы для грубого прохода на основе переданного списка scales
+        if len(scales) <= 4:
+            coarse_scales_to_test = list(scales)
+        else:
+            sorted_scales = sorted(list(scales))
+            coarse_scales_to_test = [sorted_scales[0], sorted_scales[len(sorted_scales)//2], sorted_scales[-1]]
+            if 1.0 not in coarse_scales_to_test:
+                coarse_scales_to_test.append(1.0)
+            coarse_scales_to_test = sorted(list(set(coarse_scales_to_test)))
         
         for angle in rotations:
             rotated_temp = self.rotate_image(gray_template, angle)
-            # Также утолщаем темные линии на шаблоне
-            eroded_temp = cv2.erode(rotated_temp, kernel, iterations=1)
+            # Также утолщаем темные линии на шаблоне, если это включено
+            if use_morphology:
+                kernel = np.ones((2, 2), np.uint8)
+                eroded_temp = cv2.erode(rotated_temp, kernel, iterations=1)
+            else:
+                eroded_temp = rotated_temp
             
             for c_scale in coarse_scales_to_test:
                 combined_scale = actual_coarse_scale * c_scale
@@ -95,6 +112,16 @@ class TemplateMatchingDetector(BaseDetector):
                 h_c, w_c = coarse_temp.shape[:2]
                 if h_c > local_coarse_search.shape[0] or w_c > local_coarse_search.shape[1]:
                     continue
+                
+                # Сохраняем отладочное изображение шаблона (только для первого масштаба и угла, чтобы не перегружать диск)
+                if angle == rotations[0] and c_scale == coarse_scales_to_test[0]:
+                    try:
+                        output_dir = self.config.get('paths', {}).get('output_dir', 'output')
+                        clean_class_name = "".join([c if c.isalnum() or c in ' _-' else '_' for c in class_name])
+                        os.makedirs(output_dir, exist_ok=True)
+                        cv2.imwrite(os.path.join(output_dir, f"debug_coarse_template_{clean_class_name}.jpg"), coarse_temp)
+                    except Exception as e:
+                        pass
                     
                 res = cv2.matchTemplate(local_coarse_search, coarse_temp, cv2.TM_CCOEFF_NORMED)
                 loc = np.where(res >= coarse_threshold)
@@ -214,9 +241,15 @@ class TemplateMatchingDetector(BaseDetector):
         scales = tm_config.get('scales', [1.0])
         coarse_scale_factor = tm_config.get('coarse_scale_factor', 0.25)
         coarse_threshold = tm_config.get('coarse_threshold', 0.5)
+        
+        # Гарантируем, что порог грубого прохода согласован со значением финального порога
+        coarse_threshold = min(coarse_threshold, threshold - 0.1)
+        coarse_threshold = max(0.1, coarse_threshold)
+        
         num_workers = tm_config.get('num_workers', 4)
         nms_iou = tm_config.get('nms_iou_threshold', 0.3)
         min_area = tm_config.get('min_area', 50)
+        use_morphology = tm_config.get('use_morphology', True)
         
         # Создаем копию изображения для работы
         search_img = image.copy()
@@ -229,16 +262,27 @@ class TemplateMatchingDetector(BaseDetector):
         # Для matchTemplate лучше использовать grayscale-изображения
         gray_search = cv2.cvtColor(search_img, cv2.COLOR_BGR2GRAY)
         
-        # Утолщаем темные линии (применяем эрозию на белом фоне) перед сжатием.
-        # Это предотвращает исчезновение линий толщиной 1-2 пикселя при ресайзе.
-        kernel = np.ones((2, 2), np.uint8)
-        eroded_search = cv2.erode(gray_search, kernel, iterations=1)
+        # Утолщаем темные линии (применяем эрозию на белом фоне) перед сжатием, если это включено.
+        if use_morphology:
+            kernel = np.ones((2, 2), np.uint8)
+            eroded_search = cv2.erode(gray_search, kernel, iterations=1)
+        else:
+            eroded_search = gray_search.copy()
         
         # Глобальный грубый чертеж
         coarse_gray_search = cv2.resize(
             eroded_search, (0, 0), fx=coarse_scale_factor, fy=coarse_scale_factor, interpolation=cv2.INTER_AREA
         )
         
+        # Отладочное сохранение сжатого чертежа
+        try:
+            output_dir = self.config.get('paths', {}).get('output_dir', 'output')
+            os.makedirs(output_dir, exist_ok=True)
+            cv2.imwrite(os.path.join(output_dir, "debug_coarse_image.jpg"), coarse_gray_search)
+            print(f"[DEBUG] Сохранено отладочное изображение сжатого чертежа: {os.path.join(output_dir, 'debug_coarse_image.jpg')}")
+        except Exception as e:
+            print(f"[WARNING] Не удалось сохранить отладочное изображение сжатого чертежа: {e}")
+            
         all_results = []
         
         # Запускаем параллельный поиск по шаблонам в пуле потоков

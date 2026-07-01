@@ -97,7 +97,7 @@ def extract_legend_data(pdf_path, dpi, auto_legend, manual_coords, ocr_engine_ty
     return legend_coords, templates, extractor.raw_ocr_map
 
 # Функция параллельного поиска всех значков на чертеже
-def detect_all_templates(pdf_path, dpi, templates_dict, legend_coords, tm_threshold, deskew):
+def detect_all_templates(pdf_path, dpi, templates_dict, legend_coords, tm_threshold, coarse_threshold, use_morphology, deskew):
     config = get_config()
     image = get_cached_pdf_image_streamlit(pdf_path, page_num=0, dpi=dpi, cache_dir=config['paths']['processed_dir'], deskew=deskew)
     
@@ -105,6 +105,8 @@ def detect_all_templates(pdf_path, dpi, templates_dict, legend_coords, tm_thresh
     config_run['detectors'] = config_run.get('detectors', {}).copy()
     config_run['detectors']['template_matching'] = config_run['detectors'].get('template_matching', {}).copy()
     config_run['detectors']['template_matching']['threshold'] = tm_threshold
+    config_run['detectors']['template_matching']['coarse_threshold'] = coarse_threshold
+    config_run['detectors']['template_matching']['use_morphology'] = use_morphology
     
     detector = TemplateMatchingDetector(config_run)
     detections = detector.detect(image, templates_dict, exclude_region=legend_coords)
@@ -129,9 +131,11 @@ def list_available_presets(config):
         print(f"Ошибка при сканировании шаблонов: {e}")
     return sorted(presets)
 
-def load_template_preset(preset_name, config):
+def load_template_preset(preset_name, config, target_dpi):
     """
     Загружает пресет из папки templates и возвращает список legend_items.
+    Автоматически масштабирует шаблоны УГО, если их исходное разрешение (DPI)
+    отличается от текущего целевого разрешения (target_dpi).
     """
     templates_dir = config['paths'].get('templates_dir', 'data/templates')
     preset_dir = os.path.join(templates_dir, preset_name)
@@ -140,6 +144,9 @@ def load_template_preset(preset_name, config):
     with open(manifest_path, "r", encoding="utf-8") as f:
         manifest = json.load(f)
         
+    preset_dpi = manifest.get("dpi", 150)  # По умолчанию 150 DPI для старых пресетов
+    scale_factor = target_dpi / preset_dpi
+    
     legend_items = []
     for item_data in manifest.get("items", []):
         filename = item_data["filename"]
@@ -148,6 +155,13 @@ def load_template_preset(preset_name, config):
         # cv2.imread загружает изображение в BGR
         image_np = imread_unicode(img_path)
         if image_np is not None:
+            # Масштабируем шаблон, если DPI не совпадает
+            if abs(scale_factor - 1.0) > 1e-3:
+                h_new = int(image_np.shape[0] * scale_factor)
+                w_new = int(image_np.shape[1] * scale_factor)
+                if h_new > 0 and w_new > 0:
+                    image_np = cv2.resize(image_np, (w_new, h_new), interpolation=cv2.INTER_CUBIC)
+                    
             legend_items.append({
                 'id': item_data['id'],
                 'image_np': image_np,
@@ -157,9 +171,9 @@ def load_template_preset(preset_name, config):
             })
     return legend_items
 
-def save_template_preset(preset_name, legend_items, config):
+def save_template_preset(preset_name, legend_items, config, dpi):
     """
-    Сохраняет активный набор символов как пресет в папке templates.
+    Сохраняет активный набор символов как пресет в папке templates с указанием DPI.
     """
     templates_dir = config['paths'].get('templates_dir', 'data/templates')
     preset_dir = os.path.join(templates_dir, preset_name)
@@ -183,6 +197,7 @@ def save_template_preset(preset_name, legend_items, config):
             
     manifest = {
         "preset_name": preset_name,
+        "dpi": dpi,
         "items": preset_items
     }
     
@@ -361,6 +376,21 @@ def main():
     tm_threshold = st.sidebar.slider("Порог схожести шаблона", min_value=0.4, max_value=0.9, value=0.65, step=0.05,
                                      help="Снизьте порог, если значки пропускаются. Повысьте порог, если много ложных рамок.")
 
+    # Расширенные настройки детектора
+    with st.sidebar.expander("⚙️ Расширенные настройки детектора"):
+        coarse_threshold = st.slider(
+            "Чувствительность первичного поиска", 
+            min_value=0.15, max_value=0.70, 
+            value=config['detectors']['template_matching'].get('coarse_threshold', 0.5), 
+            step=0.05,
+            help="Порог совпадения на первом (грубом) проходе. Чем ниже значение, тем больше кандидатов попадет во второй проход."
+        )
+        use_morphology = st.checkbox(
+            "Использовать морфологию (утолщение линий)", 
+            value=config['detectors']['template_matching'].get('use_morphology', True),
+            help="Рекомендуется для чертежей с тонкими линиями, чтобы они не стирались при грубом сжатии."
+        )
+
     # Проверка на изменение параметров кадрирования/файла/OCR/выравнивания для сброса кэша легенды
     current_source = (selected_pdf, dpi, auto_legend, tuple(manual_coords) if not auto_legend else None, ocr_engine_type, deskew)
     if st.session_state.get('last_source') != current_source:
@@ -384,7 +414,7 @@ def main():
             selected_preset = st.selectbox("Выберите сохраненный шаблон", available_presets)
             if st.button("📥 Подгрузить выбранный шаблон (Перейти к Шагу 2)", type="primary", use_container_width=True):
                 try:
-                    loaded_items = load_template_preset(selected_preset, config)
+                    loaded_items = load_template_preset(selected_preset, config, dpi)
                     st.session_state['legend_items'] = loaded_items
                     st.session_state['legend_coords'] = (0, 0, 0, 0)
                     st.success(f"Шаблон '{selected_preset}' успешно загружен! Вы перешли к Шагу 2.")
@@ -491,7 +521,7 @@ def main():
             if not clean_preset_name:
                 st.error("Пожалуйста, введите корректное название шаблона.")
             else:
-                saved_count = save_template_preset(clean_preset_name, st.session_state['legend_items'], config)
+                saved_count = save_template_preset(clean_preset_name, st.session_state['legend_items'], config, dpi)
                 if saved_count > 0:
                     st.success(f"Шаблон '{clean_preset_name}' успешно сохранен! Записано символов: {saved_count}.")
                 else:
@@ -531,7 +561,7 @@ def main():
                         progress_bar.progress(0.3)
                         
                         detections = detect_all_templates(
-                            pdf_path, dpi, templates_to_search, st.session_state['legend_coords'], tm_threshold, deskew
+                            pdf_path, dpi, templates_to_search, st.session_state['legend_coords'], tm_threshold, coarse_threshold, use_morphology, deskew
                         )
                         
                         progress_bar.progress(0.8)
